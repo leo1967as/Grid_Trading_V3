@@ -1,0 +1,23 @@
+# MetaTrader 5 Compiled Files
+*.ex5
+*.ex4
+
+# Logs
+Logs/
+*.log
+
+# Backups and Temporary Files
+*.bak
+*.tmp
+*.crp
+*.ini
+!Presets/*.set
+
+# IDE and System Files
+.vscode/
+.history/
+Thumbs.db
+Desktop.ini
+
+# MQL5 specific
+MQL5.storage
