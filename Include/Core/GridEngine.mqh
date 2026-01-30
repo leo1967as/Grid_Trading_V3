@@ -24,6 +24,7 @@ private:
    string            m_symbol;           // Trading symbol
    int               m_maxLevels;        // Maximum grid levels
    double            m_gridSpacing;      // Grid spacing in points
+   double            m_manualSpacing;    // Manual grid spacing (if > 0, override ATR)
    double            m_atrMultiplier;    // ATR multiplier for spacing
    int               m_atrPeriod;        // ATR period
    ENUM_TIMEFRAMES   m_atrTimeframe;     // ATR timeframe
@@ -44,6 +45,7 @@ public:
       m_symbol        = "";
       m_maxLevels     = 10;
       m_gridSpacing   = 0;
+      m_manualSpacing = 0;
       m_atrMultiplier = 1.5;
       m_atrPeriod     = 14;
       m_atrTimeframe  = PERIOD_H1;
@@ -62,13 +64,14 @@ public:
    }
    
    //--- Initialize engine
-   bool Init(string symbol, ENUM_TIMEFRAMES timeframe, int atrPeriod, double atrMultiplier, int maxLevels)
+   bool Init(string symbol, ENUM_TIMEFRAMES timeframe, int atrPeriod, double atrMultiplier, int maxLevels, int manualSpacing = 0)
    {
       m_symbol        = symbol;
       m_atrTimeframe  = timeframe;
       m_atrPeriod     = atrPeriod;
       m_atrMultiplier = atrMultiplier;
       m_maxLevels     = maxLevels;
+      m_manualSpacing = manualSpacing;
       
       // Initialize grids
       if(!m_buyGrid.Init(maxLevels) || !m_sellGrid.Init(maxLevels))
@@ -109,9 +112,17 @@ public:
       UpdateGridSpacing();
    }
    
-   //--- Update grid spacing based on current ATR
+   //--- Update grid spacing based on current ATR or manual value
    bool UpdateGridSpacing()
    {
+      // If manual spacing is set, use it directly
+      if(m_manualSpacing > 0)
+      {
+         m_gridSpacing = m_manualSpacing;
+         return true;
+      }
+      
+      // Otherwise, calculate from ATR
       if(m_atrHandle == INVALID_HANDLE)
          return false;
       

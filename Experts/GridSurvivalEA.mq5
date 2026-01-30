@@ -68,6 +68,7 @@ input group "=== ATR & Grid Settings ==="
 input ENUM_TIMEFRAMES InpATRTimeframe = PERIOD_H1;  // ATR Timeframe
 input int      InpATRPeriod       = 14;        // ATR Period
 input double   InpATRMultiplier   = 1.5;       // ATR Multiplier for Grid Spacing
+input int      InpGridSpacing     = 500;       // Grid Spacing (points) - 0=Use ATR
 input double   InpGridMultiplier  = 1.0;       // Lot Multiplier (1.0 = same, 1.5 = Martingale)
 input int      InpTakeProfit      = 500;       // Take Profit (points)
 input int      InpStopLoss        = 1000;      // Stop Loss (points)
@@ -196,9 +197,9 @@ int OnInit()
    g_ProtectionState.Init(InpEmergencyStopDD, InpHardStopDD, InpDailyLossLimit);
    
    g_IsInitialized = true;
-   Logger.Info("=== EA Initialized Successfully ===");
-   Logger.Info(StringFormat("Symbol: %s | Magic: %d | BaseLot: %.2f | GridLevels: %d",
-                            g_Symbol, InpMagicNumber, InpBaseLotSize, InpMaxGridLevels));
+   Logger.Info("=== EA Initialized Successfully [Version: PENDING_ORDERS_V1] ===");
+   Logger.Info(StringFormat("Symbol: %s | Magic: %d | BaseLot: %.2f | GridLevels: %d | TP/SL: %d/%d",
+                            g_Symbol, InpMagicNumber, InpBaseLotSize, InpMaxGridLevels, InpTakeProfit, InpStopLoss));
    
    return INIT_SUCCEEDED;
 }
@@ -277,7 +278,7 @@ bool InitializeCoreComponents()
 {
    // Grid Engine
    if(!g_GridEngine.Init(g_Symbol, InpATRTimeframe, InpATRPeriod, 
-                         InpATRMultiplier, InpMaxGridLevels))
+                         InpATRMultiplier, InpMaxGridLevels, InpGridSpacing))
    {
       Logger.Error("Failed to initialize GridEngine");
       return false;
@@ -462,9 +463,22 @@ bool CheckProtectionLayers()
    //--- Daily Loss Limit
    if(g_DailyLimit.Check())
    {
-      g_AlertManager.Warning("Daily loss limit reached - Trading paused");
-      g_SystemState.eaState = EA_STATE_PAUSED;
+      // Only log if not already paused to avoid spam
+      if(g_SystemState.eaState != EA_STATE_PAUSED)
+      {
+         g_AlertManager.Warning("Daily loss limit reached - Trading paused");
+         g_SystemState.eaState = EA_STATE_PAUSED;
+      }
       return false;
+   }
+   else if(g_SystemState.eaState == EA_STATE_PAUSED)
+   {
+      // If limit is clear (new day reset) but state is still PAUSED, resume trading
+      if(!g_HardStop.IsLocked() && !g_EmergencyStop.IsTriggered())
+      {
+         Logger.Info("Daily loss limit reset - Resuming trading operations");
+         g_SystemState.eaState = EA_STATE_IDLE;
+      }
    }
    
    //--- Layer 1: Emergency Stop
@@ -599,7 +613,9 @@ bool OpenFirstGridOrder(double lotSize)
    if(g_TradeExecutor.OpenBuy(lotSize, sl, tp, "Grid_L0_BUY"))
    {
       g_GridEngine.UpdateBuyLevelStatus(0, GRID_LEVEL_ACTIVE);
-      Logger.Info(StringFormat("First BUY order opened: Lot=%.2f, TP=%d, SL=%d", lotSize, InpTakeProfit, InpStopLoss));
+      double gridSpacingPrice = g_GridEngine.GetGridSpacingInPrice();
+      Logger.Info(StringFormat("First BUY order opened: Lot=%.2f | TP/SL=%d/%d | GridSpacing=%.2f", 
+                               lotSize, InpTakeProfit, InpStopLoss, gridSpacingPrice));
       g_LastGridTradeTime = TimeCurrent();
       return true;
    }
@@ -663,9 +679,19 @@ void CheckProfitTarget(SPositionSummary &summary)
    // TP เมื่อกำไร > 0.5% ของ equity (ปรับได้ตามต้องการ)
    double tpPercent = 0.5;
    
+   // Debug Log (Print every 1 minute to avoid spam)
+   static datetime lastDebug = 0;
+   if(TimeCurrent() - lastDebug > 60 && summary.totalPositions > 0)
+   {
+      Logger.Debug(StringFormat("Profit Check: Equity=%.2f, Profit=%.2f (%.2f%%), Target=%.2f%%", 
+                                equity, summary.totalProfit, profitPercent, tpPercent));
+      lastDebug = TimeCurrent();
+   }
+   
    if(profitPercent >= tpPercent && summary.totalPositions > 0)
    {
-      Logger.Info(StringFormat("Profit target reached: %.2f%% - Closing all positions", profitPercent));
+      Logger.Info(StringFormat("PROFIT TARGET REACHED: Profit=%.2f (%.2f%%) >= Target (%.2f%%) - Closing All", 
+                               summary.totalProfit, profitPercent, tpPercent));
       CloseAllPositions();
       
       // Reset grid after close
