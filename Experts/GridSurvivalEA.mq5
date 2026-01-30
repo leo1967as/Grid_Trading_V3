@@ -44,6 +44,7 @@
 #include "..\Include\Analysis\ATRCalculator.mqh"
 #include "..\Include\Analysis\SessionFilter.mqh"
 #include "..\Include\Analysis\NewsFilter.mqh"
+#include "..\Include\Analysis\TrendFilter.mqh"
 
 // Recovery
 #include "..\Include\Recovery\AdaptiveSizing.mqh"
@@ -78,6 +79,9 @@ input group "=== Protection Settings ==="
 input double   InpEmergencyStopDD = 10.0;      // Emergency Stop DD% (reduce size)
 input double   InpHardStopDD      = 20.0;      // Hard Stop DD% (close all)
 input double   InpDailyLossLimit  = 5.0;       // Daily Loss Limit %
+input bool     InpUseTrendFilter  = true;      // Use Trend Filter (Block entry if strong trend)
+input int      InpTrendADXThreshold = 30;      // ADX Threshold for strong trend
+input bool     InpUseWeeklyReset  = true;      // Enable Weekly Auto-Reset (Sunday)
 
 //--- Risk Management
 input group "=== Risk Management ==="
@@ -135,6 +139,7 @@ CMarketState       g_MarketState;
 CATRCalculator     g_ATRCalculator;
 CSessionFilter     g_SessionFilter;
 CNewsFilter        g_NewsFilter;
+CTrendFilter       g_TrendFilter;
 
 // Recovery & Metrics
 CAdaptiveSizing    g_AdaptiveSizing;
@@ -147,9 +152,11 @@ SSystemState       g_SystemState;
 SProtectionState   g_ProtectionState;
 
 // Symbol info
+// Symbol info
 string             g_Symbol;
 bool               g_IsInitialized = false;
 datetime           g_LastGridTradeTime = 0;
+datetime           g_LastWeekStart = 0; // Track week start for auto-reset
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -232,6 +239,9 @@ void OnTick()
 {
    if(!g_IsInitialized)
       return;
+   
+   //--- Weekly Auto-Reset Check
+   CheckWeeklyReset();
    
    //--- Update components
    UpdateAllComponents();
@@ -387,6 +397,13 @@ bool InitializeAnalysisComponents()
       return false;
    }
    
+   // Trend Filter (Feature A)
+   if(!g_TrendFilter.Init(g_Symbol, InpATRTimeframe, 14, InpTrendADXThreshold))
+   {
+      Logger.Error("Failed to initialize TrendFilter");
+      return false;
+   }
+   
    return true;
 }
 
@@ -536,6 +553,19 @@ bool IsTradingAllowed()
    {
       Logger.Debug("IsTradingAllowed: Blocked by Spread check");
       return false;
+   }
+   
+   // Check trend filter (Feature A)
+   if(InpUseTrendFilter && g_TrendFilter.IsTrendTooStrong())
+   {
+      // Only block NEW grids, allow managing existing ones? 
+      // For now, block grid entry.
+      SPositionSummary summary = g_PositionManager.GetSummary();
+      if(summary.totalPositions == 0) // Only block if we are starting a new grid
+      {
+         Logger.Debug(StringFormat("IsTradingAllowed: Blocked by Strong Trend (ADX > %d)", InpTrendADXThreshold));
+         return false;
+      }
    }
    
    // Check market conditions (optional - grid can work in trends too)
@@ -864,4 +894,65 @@ void DisplayStatus()
    
    Comment(status);
 }
+
+//+------------------------------------------------------------------+
+//| Check and Perform Weekly Auto-Reset                              |
+//+------------------------------------------------------------------+
+void CheckWeeklyReset()
+{
+   if(!InpUseWeeklyReset) return;
+   
+   datetime currentTime = TimeCurrent();
+   
+   // Calculate Start of Current Week (Sunday 00:00)
+   // TimeDayOfWeek: 0=Sun, 1=Mon, ... 6=Sat
+   MqlDateTime dt;
+   TimeToStruct(currentTime, dt);
+   
+   // Calculate seconds elapsed since Sunday 00:00
+   int secondsSinceWeekStart = (dt.day_of_week * 86400) + (dt.hour * 3600) + (dt.min * 60) + dt.sec;
+   datetime currentWeekStart = currentTime - secondsSinceWeekStart;
+   
+   // Initialization
+   if(g_LastWeekStart == 0)
+   {
+      g_LastWeekStart = currentWeekStart;
+      return;
+   }
+   
+   // Detect new week (Current week start is newer than stored)
+   if(currentWeekStart > g_LastWeekStart)
+   {
+      Logger.Info(StringFormat("NEW WEEK DETECTED (Start: %s) - Performing Weekly Auto-Reset...", 
+                               TimeToString(currentWeekStart)));
+      
+      // 1. Force Close All Positions (Start Fresh)
+      if(g_PositionManager.GetSummary().totalPositions > 0)
+      {
+         Logger.Info("Weekly Reset: Closing all existing positions...");
+         CloseAllPositions();
+      }
+      DeleteAllPendingOrders();
+      
+      // 2. Reset All Protection Layers
+      g_HardStop.ManualReset(true);
+      g_EmergencyStop.ResetDaily(); // Use ResetDaily to clear counters too
+      g_DailyLimit.ResetDaily();
+      
+      // 3. Reset Drawdown History
+      g_DrawdownMonitor.ResetHighWaterMark();
+      g_DrawdownMonitor.ForceDailyReset();
+      
+      // 4. Reset Grid & EA State
+      g_GridEngine.ResetAllGrids();
+      g_SystemState.eaState = EA_STATE_IDLE;
+      g_SystemState.tradingMode = TRADING_MODE_NORMAL;
+      
+      // Update week tracker
+      g_LastWeekStart = currentWeekStart;
+      
+      Logger.Info("WEEKLY AUTO-RESET COMPLETED - SYSTEM RESTARTED");
+   }
+}
+//+------------------------------------------------------------------+
 //+------------------------------------------------------------------+
