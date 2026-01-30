@@ -89,6 +89,12 @@ public:
       return true;
    }
    
+   //--- Update (call on each tick) - alias for UpdateSummary
+   void Update()
+   {
+      UpdateSummary();
+   }
+   
    //--- Update position summary (call on each tick)
    void UpdateSummary()
    {

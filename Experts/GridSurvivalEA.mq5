@@ -69,6 +69,8 @@ input ENUM_TIMEFRAMES InpATRTimeframe = PERIOD_H1;  // ATR Timeframe
 input int      InpATRPeriod       = 14;        // ATR Period
 input double   InpATRMultiplier   = 1.5;       // ATR Multiplier for Grid Spacing
 input double   InpGridMultiplier  = 1.0;       // Lot Multiplier (1.0 = same, 1.5 = Martingale)
+input int      InpTakeProfit      = 500;       // Take Profit (points)
+input int      InpStopLoss        = 1000;      // Stop Loss (points)
 
 //--- Protection Settings
 input group "=== Protection Settings ==="
@@ -80,7 +82,7 @@ input double   InpDailyLossLimit  = 5.0;       // Daily Loss Limit %
 input group "=== Risk Management ==="
 input double   InpRiskPerTrade    = 1.0;       // Risk Per Trade %
 input double   InpMaxTotalRisk    = 10.0;      // Max Total Risk %
-input double   InpMaxSpread       = 30.0;      // Max Spread (points)
+input double   InpMaxSpread       = 100.0;     // Max Spread (points) - XAUUSD typically 50-200
 
 //--- Session Filter
 input group "=== Session Filter ==="
@@ -146,6 +148,7 @@ SProtectionState   g_ProtectionState;
 // Symbol info
 string             g_Symbol;
 bool               g_IsInitialized = false;
+datetime           g_LastGridTradeTime = 0;
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -265,20 +268,7 @@ void OnTimer()
 //+------------------------------------------------------------------+
 //| Trade transaction function                                       |
 //+------------------------------------------------------------------+
-void OnTradeTransaction(const MqlTradeTransaction &trans,
-                       const MqlTradeRequest &request,
-                       const MqlTradeResult &result)
-{
-   // Track closed trades for performance
-   if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
-   {
-      if(trans.deal_type == DEAL_TYPE_BUY || trans.deal_type == DEAL_TYPE_SELL)
-      {
-         // Position closed - record profit
-         // This would need more logic to track actual closed trades
-      }
-   }
-}
+// Trade transaction function removed (duplicate)
 
 //+------------------------------------------------------------------+
 //| Initialize Core Components                                       |
@@ -329,6 +319,7 @@ bool InitializeProtectionComponents()
       Logger.Error("Failed to initialize RiskManager");
       return false;
    }
+   g_RiskManager.SetMaxSpread(InpMaxSpread);  // Set max spread from input
    
    // Drawdown Monitor
    if(!g_DrawdownMonitor.Init())
@@ -504,26 +495,34 @@ bool IsTradingAllowed()
    // Check EA state
    if(g_SystemState.eaState != EA_STATE_TRADING && 
       g_SystemState.eaState != EA_STATE_IDLE)
+   {
+      Logger.Debug(StringFormat("IsTradingAllowed: Blocked by EA state: %s", EnumToString(g_SystemState.eaState)));
       return false;
+   }
    
-   // Check session filter
-   if(!g_SessionFilter.IsTradingAllowed())
+   // Check session filter (only if enabled)
+   if(InpUseSessionFilter && !g_SessionFilter.IsTradingAllowed())
    {
       g_SystemState.sessionState = g_SessionFilter.GetState();
+      Logger.Debug(StringFormat("IsTradingAllowed: Blocked by Session Filter: %s", EnumToString(g_SystemState.sessionState)));
       return false;
    }
    g_SystemState.sessionState = SESSION_STATE_OPEN;
    
-   // Check news filter
-   if(!g_NewsFilter.IsTradingAllowed())
+   // Check news filter (only if enabled)
+   if(InpUseNewsFilter && !g_NewsFilter.IsTradingAllowed())
    {
       g_SystemState.sessionState = SESSION_STATE_NEWS_PAUSE;
+      Logger.Debug("IsTradingAllowed: Blocked by News Filter");
       return false;
    }
    
    // Check spread
    if(!g_RiskManager.IsSpreadAcceptable())
+   {
+      Logger.Debug("IsTradingAllowed: Blocked by Spread check");
       return false;
+   }
    
    // Check market conditions (optional - grid can work in trends too)
    g_MarketState.Update();
@@ -538,23 +537,36 @@ bool IsTradingAllowed()
 void ProcessTradingLogic()
 {
    //--- Update grid engine
-   g_GridEngine.Update(SymbolInfoDouble(g_Symbol, SYMBOL_BID));
+   double currentBid = SymbolInfoDouble(g_Symbol, SYMBOL_BID);
+   g_GridEngine.Update(currentBid);
    
    //--- Get current lot size (adjusted for risk/DD)
    double lotSize = g_AdaptiveSizing.GetAdjustedLotSize(g_Symbol);
    
-   //--- Check for new grid entries
-   // This is a simplified example - real logic would be more complex
-   
    // Get position summary
    SPositionSummary summary = g_PositionManager.GetSummary();
+   int pendingOrders = g_GridEngine.GetTotalPendingOrders();
    
-   // Check if we can add more positions
-   if(summary.totalPositions < InpMaxGridLevels)
+   //--- ถ้ายังไม่มี position เลย ให้เปิด First Order และวาง Pending Orders
+   if(summary.totalPositions == 0)
    {
-      // Check grid levels for entry signals
-      // ... (grid entry logic to be implemented)
+      if(OpenFirstGridOrder(lotSize))
+      {
+         // After first order, place pending orders immediately
+         PlaceGridPendingOrders(lotSize);
+      }
+      return;
    }
+   
+   //--- ถ้ามี positions แต่ pending หายไป (เช่น โดน cancel หรือ expire) ให้เติม
+   if(summary.totalPositions > 0 && pendingOrders < (InpMaxGridLevels - summary.totalPositions))
+   {
+      // Refill pending orders corresponding to empty levels
+      PlaceGridPendingOrders(lotSize);
+   }
+   
+   //--- Check for profit target (simple TP logic)
+   CheckProfitTarget(summary);
    
    // Update system state
    if(summary.totalPositions > 0)
@@ -564,12 +576,180 @@ void ProcessTradingLogic()
 }
 
 //+------------------------------------------------------------------+
-//| Close All Positions                                              |
+//| Open First Grid Order                                            |
+//+------------------------------------------------------------------+
+bool OpenFirstGridOrder(double lotSize)
+{
+   Logger.Info("Opening first grid order...");
+   
+   // Set base price at current price
+   double currentBid = SymbolInfoDouble(g_Symbol, SYMBOL_BID);
+   g_GridEngine.SetBasePrice(currentBid);
+   
+   // Generate grid levels
+   g_GridEngine.GenerateBuyGridLevels(lotSize);
+   g_GridEngine.GenerateSellGridLevels(lotSize);
+   
+   // Calculate TP/SL prices
+   double point = SymbolInfoDouble(g_Symbol, SYMBOL_POINT);
+   double sl = (InpStopLoss > 0) ? currentBid - (InpStopLoss * point) : 0;
+   double tp = (InpTakeProfit > 0) ? currentBid + (InpTakeProfit * point) : 0;
+   
+   // Open initial BUY order (Grid Trading typically starts with a market order)
+   if(g_TradeExecutor.OpenBuy(lotSize, sl, tp, "Grid_L0_BUY"))
+   {
+      g_GridEngine.UpdateBuyLevelStatus(0, GRID_LEVEL_ACTIVE);
+      Logger.Info(StringFormat("First BUY order opened: Lot=%.2f, TP=%d, SL=%d", lotSize, InpTakeProfit, InpStopLoss));
+      g_LastGridTradeTime = TimeCurrent();
+      return true;
+   }
+   else
+   {
+      Logger.Error("Failed to open first BUY order");
+      return false;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Place Pending Orders for Grid                                    |
+//+------------------------------------------------------------------+
+void PlaceGridPendingOrders(double lotSize)
+{
+   double point = SymbolInfoDouble(g_Symbol, SYMBOL_POINT);
+   
+   // Loop through all levels starting from 1 (Level 0 is market order)
+   for(int i = 1; i < InpMaxGridLevels; i++)
+   {
+      //--- Check BUY Grid
+      SGridLevel buyLevel = g_GridEngine.GetBuyLevel(i);
+      if(buyLevel.status == GRID_LEVEL_EMPTY)
+      {
+         double entryPrice = g_GridEngine.CalculateLevelPrice(i, GRID_DIRECTION_BUY);
+         double sl = (InpStopLoss > 0) ? entryPrice - (InpStopLoss * point) : 0;
+         double tp = (InpTakeProfit > 0) ? entryPrice + (InpTakeProfit * point) : 0;
+         
+         // Apply multiplier
+         double adjustedLot = lotSize * MathPow(InpGridMultiplier, i);
+         adjustedLot = NormalizeLot(g_Symbol, adjustedLot);
+         
+         string comment = StringFormat("Grid_L%d_BUY", i);
+         STradeResult result = g_TradeExecutor.BuyLimit(adjustedLot, entryPrice, sl, tp, 0, comment);
+         
+         if(result.success)
+         {
+            g_GridEngine.UpdateBuyLevelStatus(i, GRID_LEVEL_PENDING, result.ticket);
+            Logger.Info(StringFormat("Placed Buy Limit L%d at %.5f", i, entryPrice));
+         }
+      }
+      
+      //--- Check SELL Grid (for hedging purpose - optional, usually grid is one direction if trend following)
+      // Since this is "Survival Protocol", we assume we might need sell limits if we are hedging.
+      // But for standard grid, we usually just scale in direction.
+      // If user wants bidirectional grid, we can add logic here.
+      // For now, let's stick to Buy Grid as primary (since First Order was Buy)
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Check Profit Target - Close All When in Profit                   |
+//+------------------------------------------------------------------+
+void CheckProfitTarget(SPositionSummary &summary)
+{
+   // Simple TP: Close all when total profit > certain threshold
+   // ใช้ profit เป็น % ของ equity
+   double equity = AccountInfoDouble(ACCOUNT_EQUITY);
+   double profitPercent = (summary.totalProfit / equity) * 100.0;
+   
+   // TP เมื่อกำไร > 0.5% ของ equity (ปรับได้ตามต้องการ)
+   double tpPercent = 0.5;
+   
+   if(profitPercent >= tpPercent && summary.totalPositions > 0)
+   {
+      Logger.Info(StringFormat("Profit target reached: %.2f%% - Closing all positions", profitPercent));
+      CloseAllPositions();
+      
+      // Reset grid after close
+      g_GridEngine.ResetAllGrids();
+      
+      // Reset throttling
+      g_LastGridTradeTime = 0;
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Trade Transaction Event                                          |
+//+------------------------------------------------------------------+
+//+------------------------------------------------------------------+
+//| Trade Transaction Event                                          |
+//+------------------------------------------------------------------+
+void OnTradeTransaction(const MqlTradeTransaction& trans,
+                        const MqlTradeRequest& request,
+                        const MqlTradeResult& result)
+{
+   if(trans.type == TRADE_TRANSACTION_DEAL_ADD)
+   {
+      ulong order = trans.order;
+      ulong deal  = trans.deal;
+      
+      if(HistoryDealSelect(deal))
+      {
+         string symbol = HistoryDealGetString(deal, DEAL_SYMBOL);
+         long magic = HistoryDealGetInteger(deal, DEAL_MAGIC);
+         
+         // Verify Symbol and Magic Number
+         if(symbol == g_Symbol && magic == InpMagicNumber)
+         {
+            long entryType = HistoryDealGetInteger(deal, DEAL_ENTRY);
+            
+            // 1. Handle Closed Trades (OUT / OUT_BY) -> Update Performance
+            if(entryType == DEAL_ENTRY_OUT || entryType == DEAL_ENTRY_OUT_BY)
+            {
+               double profit = HistoryDealGetDouble(deal, DEAL_PROFIT);
+               double swap = HistoryDealGetDouble(deal, DEAL_SWAP);
+               double comm = HistoryDealGetDouble(deal, DEAL_COMMISSION);
+               double totalResult = profit + swap + comm;
+               
+               g_PerformanceTracker.RecordTrade(totalResult);
+               Logger.Debug(StringFormat("Trade Closed: Ticket=%d, Result=%.2f", deal, totalResult));
+            }
+            
+            // 2. Handle New Trades (IN) -> Update Grid Status
+            // Check comment for "Grid_L" pattern
+            string comment = HistoryDealGetString(deal, DEAL_COMMENT);
+            if(StringFind(comment, "Grid_L") >= 0)
+            {
+               string parts[];
+               StringSplit(comment, '_', parts);
+               if(ArraySize(parts) >= 2)
+               {
+                  string levelPart = parts[1]; // L1
+                  int level = (int)StringSubstr(levelPart, 1);
+                  
+                  if(StringFind(comment, "BUY") >= 0)
+                  {
+                     g_GridEngine.UpdateBuyLevelStatus(level, GRID_LEVEL_ACTIVE, (ulong)trans.position);
+                     Logger.Info(StringFormat("Grid BUY L%d executed (Entry)", level));
+                  }
+                  else if(StringFind(comment, "SELL") >= 0)
+                  {
+                     g_GridEngine.UpdateSellLevelStatus(level, GRID_LEVEL_ACTIVE, (ulong)trans.position);
+                     Logger.Info(StringFormat("Grid SELL L%d executed (Entry)", level));
+                  }
+               }
+            }
+         }
+      }
+   }
+}
+
+//+------------------------------------------------------------------+
+//| Close All Positions and Pending Orders                           |
 //+------------------------------------------------------------------+
 void CloseAllPositions()
 {
-   Logger.Warning("Closing all positions...");
+   Logger.Warning("Closing all positions and pending orders...");
    
+   // 1. Close Open Positions
    ulong tickets[];
    g_PositionManager.GetPositionTickets(tickets);
    
@@ -578,7 +758,31 @@ void CloseAllPositions()
       g_TradeExecutor.ClosePosition(tickets[i]);
    }
    
-   Logger.Info("All positions closed");
+   // 2. Delete Pending Orders
+   DeleteAllPendingOrders();
+   
+   Logger.Info("All positions closed and pending orders deleted");
+}
+
+//+------------------------------------------------------------------+
+//| Delete All Pending Orders                                        |
+//+------------------------------------------------------------------+
+void DeleteAllPendingOrders()
+{
+   // Loop through orders and delete those belonging to this EA (magic number)
+   int total = OrdersTotal();
+   for(int i = total - 1; i >= 0; i--)
+   {
+      ulong ticket = OrderGetTicket(i);
+      if(ticket > 0)
+      {
+         if(OrderGetInteger(ORDER_MAGIC) == InpMagicNumber &&
+            OrderGetString(ORDER_SYMBOL) == g_Symbol)
+         {
+            g_TradeExecutor.DeleteOrder(ticket);
+         }
+      }
+   }
 }
 
 //+------------------------------------------------------------------+

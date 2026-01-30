@@ -190,11 +190,28 @@ public:
       return GetEquity() >= m_params.minEquity;
    }
    
+   //--- Set max spread
+   void SetMaxSpread(double maxSpread)
+   {
+      m_params.maxSpread = maxSpread;
+   }
+   
    //--- Check if spread is acceptable
    bool IsSpreadAcceptable()
    {
       double spread = GetSpread(m_symbol);
-      return spread <= m_params.maxSpread;
+      if(spread > m_params.maxSpread)
+      {
+         // Only log occasionally to avoid spam
+         static datetime lastLog = 0;
+         if(TimeCurrent() - lastLog > 60)
+         {
+            Logger.Debug(StringFormat("Spread too high: %.1f > %.1f (max)", spread, m_params.maxSpread));
+            lastLog = TimeCurrent();
+         }
+         return false;
+      }
+      return true;
    }
    
    //--- Check all trading conditions

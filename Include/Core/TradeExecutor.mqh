@@ -95,6 +95,20 @@ public:
       m_trade.SetDeviationInPoints(m_slippage);
    }
    
+   //--- Open Buy (alias for Buy, returns bool)
+   bool OpenBuy(double lots, double sl = 0, double tp = 0, string comment = "")
+   {
+      STradeResult result = Buy(lots, sl, tp, comment);
+      return result.success;
+   }
+   
+   //--- Open Sell (alias for Sell, returns bool)
+   bool OpenSell(double lots, double sl = 0, double tp = 0, string comment = "")
+   {
+      STradeResult result = Sell(lots, sl, tp, comment);
+      return result.success;
+   }
+   
    //--- Open market buy order
    STradeResult Buy(double lots, double sl = 0, double tp = 0, string comment = "")
    {
