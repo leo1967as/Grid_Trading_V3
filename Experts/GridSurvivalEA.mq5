@@ -157,6 +157,7 @@ string             g_Symbol;
 bool               g_IsInitialized = false;
 datetime           g_LastGridTradeTime = 0;
 datetime           g_LastWeekStart = 0; // Track week start for auto-reset
+string             g_BlockingReason = "None"; // UI feedback for why trading is blocked
 
 //+------------------------------------------------------------------+
 //| Expert initialization function                                   |
@@ -523,10 +524,13 @@ bool CheckProtectionLayers()
 //+------------------------------------------------------------------+
 bool IsTradingAllowed()
 {
+   g_BlockingReason = "None"; // Reset reason
+
    // Check EA state
    if(g_SystemState.eaState != EA_STATE_TRADING && 
       g_SystemState.eaState != EA_STATE_IDLE)
    {
+      g_BlockingReason = "State: " + EnumToString(g_SystemState.eaState);
       Logger.Debug(StringFormat("IsTradingAllowed: Blocked by EA state: %s", EnumToString(g_SystemState.eaState)));
       return false;
    }
@@ -535,6 +539,7 @@ bool IsTradingAllowed()
    if(InpUseSessionFilter && !g_SessionFilter.IsTradingAllowed())
    {
       g_SystemState.sessionState = g_SessionFilter.GetState();
+      g_BlockingReason = "Session: " + EnumToString(g_SystemState.sessionState);
       Logger.Debug(StringFormat("IsTradingAllowed: Blocked by Session Filter: %s", EnumToString(g_SystemState.sessionState)));
       return false;
    }
@@ -544,6 +549,7 @@ bool IsTradingAllowed()
    if(InpUseNewsFilter && !g_NewsFilter.IsTradingAllowed())
    {
       g_SystemState.sessionState = SESSION_STATE_NEWS_PAUSE;
+      g_BlockingReason = "News Event";
       Logger.Debug("IsTradingAllowed: Blocked by News Filter");
       return false;
    }
@@ -551,6 +557,7 @@ bool IsTradingAllowed()
    // Check spread
    if(!g_RiskManager.IsSpreadAcceptable())
    {
+      g_BlockingReason = StringFormat("Spread Too High (Max: %.0f)", InpMaxSpread);
       Logger.Debug("IsTradingAllowed: Blocked by Spread check");
       return false;
    }
@@ -563,6 +570,7 @@ bool IsTradingAllowed()
       SPositionSummary summary = g_PositionManager.GetSummary();
       if(summary.totalPositions == 0) // Only block if we are starting a new grid
       {
+         g_BlockingReason = StringFormat("Strong Trend (ADX > %d)", InpTrendADXThreshold);
          Logger.Debug(StringFormat("IsTradingAllowed: Blocked by Strong Trend (ADX > %d)", InpTrendADXThreshold));
          return false;
       }
@@ -889,6 +897,12 @@ void DisplayStatus()
                           g_PerformanceTracker.GetWinRate(),
                           g_PerformanceTracker.GetProfitFactor(),
                           g_PerformanceTracker.GetTotalTrades());
+
+   //--- Blocking Status (Feedback line)
+   if(g_BlockingReason != "None" && g_BlockingReason != "")
+   {
+      status += "⚠️ BLOCKED BY: " + g_BlockingReason + "\n";
+   }
    
    status += "═══════════════════════════════════════════════";
    
