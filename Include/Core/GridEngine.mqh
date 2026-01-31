@@ -24,12 +24,17 @@ private:
    string            m_symbol;           // Trading symbol
    int               m_maxLevels;        // Maximum grid levels
    double            m_gridSpacing;      // Grid spacing in points
-   double            m_manualSpacing;    // Manual grid spacing (if > 0, override ATR)
+   double            m_fixedSpacing;     // Fixed grid spacing (if dynamic OFF)
    double            m_atrMultiplier;    // ATR multiplier for spacing
    int               m_atrPeriod;        // ATR period
    ENUM_TIMEFRAMES   m_atrTimeframe;     // ATR timeframe
    int               m_atrHandle;        // ATR indicator handle
    double            m_atrBuffer[];      // ATR values buffer
+   
+   // Dynamic Spacing Settings (NEW)
+   bool              m_useDynamicSpacing;   // Toggle: True=ATR, False=Fixed
+   int               m_minDynamicSpacing;   // Min spacing (floor)
+   int               m_maxDynamicSpacing;   // Max spacing (ceiling)
    
    SGridArray        m_buyGrid;          // Buy grid levels
    SGridArray        m_sellGrid;         // Sell grid levels
@@ -45,7 +50,7 @@ public:
       m_symbol        = "";
       m_maxLevels     = 10;
       m_gridSpacing   = 0;
-      m_manualSpacing = 0;
+      m_fixedSpacing  = 500;
       m_atrMultiplier = 1.5;
       m_atrPeriod     = 14;
       m_atrTimeframe  = PERIOD_H1;
@@ -53,6 +58,9 @@ public:
       m_basePrice     = 0;
       m_currentPrice  = 0;
       m_isInitialized = false;
+      m_useDynamicSpacing  = true;
+      m_minDynamicSpacing  = 100;
+      m_maxDynamicSpacing  = 2000;
       
       ArraySetAsSeries(m_atrBuffer, true);
    }
@@ -63,15 +71,21 @@ public:
       Deinit();
    }
    
-   //--- Initialize engine
-   bool Init(string symbol, ENUM_TIMEFRAMES timeframe, int atrPeriod, double atrMultiplier, int maxLevels, int manualSpacing = 0)
+   //--- Initialize engine (Updated for Dynamic Spacing)
+   bool Init(string symbol, ENUM_TIMEFRAMES timeframe, int atrPeriod, double atrMultiplier, int maxLevels,
+             bool useDynamicSpacing, int fixedSpacing, int minDynamic, int maxDynamic)
    {
       m_symbol        = symbol;
       m_atrTimeframe  = timeframe;
       m_atrPeriod     = atrPeriod;
       m_atrMultiplier = atrMultiplier;
       m_maxLevels     = maxLevels;
-      m_manualSpacing = manualSpacing;
+      
+      // Dynamic Spacing Settings
+      m_useDynamicSpacing = useDynamicSpacing;
+      m_fixedSpacing      = fixedSpacing;
+      m_minDynamicSpacing = minDynamic;
+      m_maxDynamicSpacing = maxDynamic;
       
       // Initialize grids
       if(!m_buyGrid.Init(maxLevels) || !m_sellGrid.Init(maxLevels))
@@ -80,7 +94,7 @@ public:
          return false;
       }
       
-      // Create ATR indicator
+      // Create ATR indicator (needed even if dynamic OFF, for on-chart display)
       m_atrHandle = iATR(m_symbol, m_atrTimeframe, m_atrPeriod);
       if(m_atrHandle == INVALID_HANDLE)
       {
@@ -89,8 +103,9 @@ public:
       }
       
       m_isInitialized = true;
-      Logger.Info(StringFormat("GridEngine initialized: Symbol=%s, MaxLevels=%d, ATR=%d", 
-                               m_symbol, m_maxLevels, m_atrPeriod));
+      Logger.Info(StringFormat("GridEngine initialized: Symbol=%s, MaxLevels=%d, DynamicSpacing=%s, Range=[%d-%d]", 
+                               m_symbol, m_maxLevels, m_useDynamicSpacing ? "ON" : "OFF",
+                               m_minDynamicSpacing, m_maxDynamicSpacing));
       return true;
    }
    
@@ -112,31 +127,47 @@ public:
       UpdateGridSpacing();
    }
    
-   //--- Update grid spacing based on current ATR or manual value
+   //--- Update grid spacing based on ATR or fixed value
    bool UpdateGridSpacing()
    {
-      // If manual spacing is set, use it directly
-      if(m_manualSpacing > 0)
+      // If Dynamic Spacing is OFF, use fixed value
+      if(!m_useDynamicSpacing)
       {
-         m_gridSpacing = m_manualSpacing;
+         m_gridSpacing = m_fixedSpacing;
          return true;
       }
       
-      // Otherwise, calculate from ATR
+      // Dynamic Spacing: Calculate from ATR
       if(m_atrHandle == INVALID_HANDLE)
+      {
+         Logger.Warning("ATR Handle Invalid! Falling back to Fixed Spacing.");
+         m_gridSpacing = m_fixedSpacing;
          return false;
+      }
       
       if(CopyBuffer(m_atrHandle, 0, 0, 1, m_atrBuffer) <= 0)
       {
-         Logger.Error("Failed to copy ATR buffer");
+         Logger.Warning("Failed to copy ATR buffer! Falling back to Fixed Spacing.");
+         m_gridSpacing = m_fixedSpacing;
          return false;
       }
       
       double atrValue = m_atrBuffer[0];
       double point    = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
       
+      // Validation: If ATR is invalid/zero, fallback
+      if(atrValue <= 0 || point <= 0)
+      {
+         Logger.Warning(StringFormat("ATR Invalid (%.5f)! Falling back to Fixed Spacing.", atrValue));
+         m_gridSpacing = m_fixedSpacing;
+         return false;
+      }
+      
       // Calculate grid spacing in points
-      m_gridSpacing = (atrValue / point) * m_atrMultiplier;
+      double rawSpacing = (atrValue / point) * m_atrMultiplier;
+      
+      // Apply Min/Max clamp
+      m_gridSpacing = MathMax(m_minDynamicSpacing, MathMin(m_maxDynamicSpacing, rawSpacing));
       
       return true;
    }

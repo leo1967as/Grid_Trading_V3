@@ -69,7 +69,10 @@ input group "=== ATR & Grid Settings ==="
 input ENUM_TIMEFRAMES InpATRTimeframe = PERIOD_H1;  // ATR Timeframe
 input int      InpATRPeriod       = 14;        // ATR Period
 input double   InpATRMultiplier   = 1.5;       // ATR Multiplier for Grid Spacing
-input int      InpGridSpacing     = 500;       // Grid Spacing (points) - 0=Use ATR
+input bool     InpUseDynamicSpacing = true;   // Use Dynamic Spacing (ATR-based)
+input int      InpFixedSpacing    = 500;       // Fixed Spacing (points) - Used if Dynamic OFF
+input int      InpMinDynamicSpacing = 100;     // Min Dynamic Spacing (points)
+input int      InpMaxDynamicSpacing = 2000;    // Max Dynamic Spacing (points)
 input double   InpGridMultiplier  = 1.0;       // Lot Multiplier (1.0 = same, 1.5 = Martingale)
 input int      InpTakeProfit      = 500;       // Take Profit (points)
 input int      InpStopLoss        = 1000;      // Stop Loss (points)
@@ -289,7 +292,8 @@ bool InitializeCoreComponents()
 {
    // Grid Engine
    if(!g_GridEngine.Init(g_Symbol, InpATRTimeframe, InpATRPeriod, 
-                         InpATRMultiplier, InpMaxGridLevels, InpGridSpacing))
+                         InpATRMultiplier, InpMaxGridLevels,
+                         InpUseDynamicSpacing, InpFixedSpacing, InpMinDynamicSpacing, InpMaxDynamicSpacing))
    {
       Logger.Error("Failed to initialize GridEngine");
       return false;
