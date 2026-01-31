@@ -23,6 +23,7 @@ enum ENUM_EA_STATE
    EA_STATE_EMERGENCY,          // Emergency mode (Level 1 triggered)
    EA_STATE_RECOVERY,           // Recovery mode (rebuilding equity)
    EA_STATE_LOCKED,             // Soft Lock mode (Hedge active)
+   EA_STATE_DE_ESCALATING,      // De-escalation mode (Recovery Scalping)
    EA_STATE_STOPPED,            // Stopped by HardStop or DailyLimit
    EA_STATE_ERROR               // Error state
 };

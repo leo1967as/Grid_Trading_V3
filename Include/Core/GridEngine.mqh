@@ -191,6 +191,12 @@ public:
       Logger.Info(StringFormat("Base price set: %.5f", m_basePrice));
    }
    
+   //--- Get base price
+   double GetBasePrice() const
+   {
+      return m_basePrice;
+   }
+   
    //--- Calculate price for a grid level
    double CalculateLevelPrice(int levelIndex, ENUM_GRID_DIRECTION direction)
    {

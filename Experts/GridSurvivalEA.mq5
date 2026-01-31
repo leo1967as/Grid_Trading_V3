@@ -49,6 +49,7 @@
 
 // Recovery
 #include "..\Include\Recovery\AdaptiveSizing.mqh"
+#include "..\Include\Recovery\DeEscalationEngine.mqh" // Phase 6: Recovery
 
 // Metrics
 #include "..\Include\Metrics\PerformanceTracker.mqh"
@@ -125,6 +126,13 @@ input group "=== Debug ==="
 input ENUM_LOG_LEVEL InpLogLevel = LOG_LEVEL_INFO; // Log Level
 input bool     InpEnableFileLog   = false;     // Enable File Logging
 
+//--- Recovery Settings (Phase 6)
+input group "=== Recovery Settings (Phase 6) ==="
+input bool     InpUseDeEscalation   = true;    // Enable De-escalation
+input double   InpRecoveryLotSize   = 0.01;    // Recovery Scalp Lot
+input int      InpRecoveryTP        = 50;      // Recovery TP (points)
+input int      InpScalpCooldown     = 60;      // Seconds between scalps
+
 //+------------------------------------------------------------------+
 //| Global Variables                                                 |
 //+------------------------------------------------------------------+
@@ -149,10 +157,11 @@ CNewsFilter        g_NewsFilter;
 CTrendFilter       g_TrendFilter;
 
 // Recovery & Metrics
-CAdaptiveSizing    g_AdaptiveSizing;
-CPerformanceTracker g_PerformanceTracker;
-CEquityCurve       g_EquityCurve;
-CAlertManager      g_AlertManager;
+CAdaptiveSizing       g_AdaptiveSizing;
+CDeEscalationEngine   g_DeEscalationEngine;  // Phase 6
+CPerformanceTracker   g_PerformanceTracker;
+CEquityCurve          g_EquityCurve;
+CAlertManager         g_AlertManager;
 
 // State tracking
 SSystemState       g_SystemState;
@@ -211,6 +220,9 @@ int OnInit()
    g_SystemState.Init();
    g_ProtectionState.Init(InpEmergencyStopDD, InpHardStopDD, InpDailyLossLimit);
    
+   //--- Initialize De-escalation Engine (Phase 6)
+   g_DeEscalationEngine.Init(g_Symbol, InpMagicNumber, InpRecoveryLotSize, InpRecoveryTP, InpScalpCooldown);
+   
    g_IsInitialized = true;
    Logger.Info("=== EA Initialized Successfully [Version: PENDING_ORDERS_V1] ===");
    Logger.Info(StringFormat("Symbol: %s | Magic: %d | BaseLot: %.2f | GridLevels: %d | TP/SL: %d/%d",
@@ -263,7 +275,12 @@ void OnTick()
    //--- Check protection layers (in priority order)
    if(!CheckProtectionLayers())
    {
-      // Protection triggered - don't trade
+      // Protection triggered - check if De-escalation should run
+      if(g_SystemState.eaState == EA_STATE_LOCKED && InpUseDeEscalation)
+      {
+         g_SystemState.eaState = EA_STATE_DE_ESCALATING;
+         g_DeEscalationEngine.Process(g_SystemState);
+      }
       DisplayStatus();
       return;
    }
@@ -727,6 +744,23 @@ void PlaceGridPendingOrders(double lotSize)
 {
    double point = SymbolInfoDouble(g_Symbol, SYMBOL_POINT);
    
+   // Ensure base price is set (Fix for refill scenario)
+   if(g_GridEngine.GetBasePrice() == 0)
+   {
+      double currentBid = SymbolInfoDouble(g_Symbol, SYMBOL_BID);
+      g_GridEngine.SetBasePrice(currentBid);
+      g_GridEngine.GenerateBuyGridLevels(lotSize);
+      g_GridEngine.GenerateSellGridLevels(lotSize);
+      Logger.Info(StringFormat("PlaceGridPendingOrders: BasePrice was 0, reset to %.5f", currentBid));
+   }
+   
+   // Validate grid spacing
+   if(g_GridEngine.GetGridSpacing() == 0)
+   {
+      Logger.Warning("Grid spacing is 0. Cannot place pending orders.");
+      return;
+   }
+   
    // Loop through all levels starting from 1 (Level 0 is market order)
    for(int i = 1; i < InpMaxGridLevels; i++)
    {
@@ -737,8 +771,20 @@ void PlaceGridPendingOrders(double lotSize)
          if(buyLevel.status == GRID_LEVEL_EMPTY)
          {
             double entryPrice = g_GridEngine.CalculateLevelPrice(i, GRID_DIRECTION_BUY);
+            
+            // Validate entry price
+            if(entryPrice <= 0)
+            {
+               Logger.Warning(StringFormat("Invalid entry price for Buy L%d: %.5f (skipping)", i, entryPrice));
+               continue;
+            }
+            
             double sl = (InpStopLoss > 0) ? entryPrice - (InpStopLoss * point) : 0;
             double tp = (InpTakeProfit > 0) ? entryPrice + (InpTakeProfit * point) : 0;
+            
+            // Validate SL/TP
+            if(sl < 0) sl = 0;
+            if(tp < 0) tp = 0;
             
             double adjustedLot = lotSize * MathPow(InpGridMultiplier, i);
             adjustedLot = NormalizeLot(g_Symbol, adjustedLot);
@@ -761,8 +807,20 @@ void PlaceGridPendingOrders(double lotSize)
          if(sellLevel.status == GRID_LEVEL_EMPTY)
          {
             double entryPrice = g_GridEngine.CalculateLevelPrice(i, GRID_DIRECTION_SELL);
+            
+            // Validate entry price
+            if(entryPrice <= 0)
+            {
+               Logger.Warning(StringFormat("Invalid entry price for Sell L%d: %.5f (skipping)", i, entryPrice));
+               continue;
+            }
+            
             double sl = (InpStopLoss > 0) ? entryPrice + (InpStopLoss * point) : 0;
             double tp = (InpTakeProfit > 0) ? entryPrice - (InpTakeProfit * point) : 0;
+            
+            // Validate SL/TP
+            if(sl < 0) sl = 0;
+            if(tp < 0) tp = 0;
             
             double adjustedLot = lotSize * MathPow(InpGridMultiplier, i);
             adjustedLot = NormalizeLot(g_Symbol, adjustedLot);
