@@ -885,7 +885,20 @@ void DisplayStatus()
    //--- Session/News
    status += StringFormat("Session: %s | News: %s\n",
                           g_SessionFilter.GetStateString(),
-                          g_NewsFilter.IsNewsTime() ? "PAUSE" : "OK");
+                          g_NewsFilter.IsNewsTime() ? "PAUSE" : "OK"); 
+                          
+   //--- Trend & Features (New)
+   string trendInfo = "OFF";
+   if(InpUseTrendFilter)
+      trendInfo = StringFormat("ADX:%.1f (%s)", g_TrendFilter.GetCurrentADX(), g_TrendFilter.IsTrendTooStrong() ? "STRONG" : "WEAK");
+      
+   status += StringFormat("Trend: %s | Week Start: %s\n", trendInfo, g_LastWeekStart > 0 ? TimeToString(g_LastWeekStart, TIME_DATE) : "-");
+   
+   //--- Blocking Reason
+   if(g_SystemState.eaState == EA_STATE_IDLE && g_BlockingReason != "None")
+   {
+      status += StringFormat("⚠ BLOCKED: %s\n", g_BlockingReason);
+   }
    
    //--- Sizing
    status += StringFormat("Lot Size: %.2f (%.0f%% of base)\n",
