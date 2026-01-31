@@ -31,6 +31,7 @@
 #include "..\Include\Core\GridEngine.mqh"
 #include "..\Include\Core\PositionManager.mqh"
 #include "..\Include\Core\TradeExecutor.mqh"
+#include "..\Include\Core\HedgeManager.mqh" // Phase 5: Soft Lock
 
 // Protection
 #include "..\Include\Protection\RiskManager.mqh"
@@ -79,7 +80,8 @@ input int      InpStopLoss        = 1000;      // Stop Loss (points)
 
 //--- Protection Settings
 input group "=== Protection Settings ==="
-input double   InpEmergencyStopDD = 10.0;      // Emergency Stop DD% (reduce size)
+input bool     InpUseHedge        = false;     // Use Hedge (Soft Lock) when Emergency DD hit
+input double   InpEmergencyStopDD = 10.0;      // Emergency Stop DD% (reduce size/Hedge)
 input double   InpHardStopDD      = 20.0;      // Hard Stop DD% (close all)
 input double   InpDailyLossLimit  = 5.0;       // Daily Loss Limit %
 input bool     InpUseTrendFilter  = true;      // Use Trend Filter (Block entry if strong trend)
@@ -129,6 +131,7 @@ input bool     InpEnableFileLog   = false;     // Enable File Logging
 CGridEngine        g_GridEngine;
 CPositionManager   g_PositionManager;
 CTradeExecutor     g_TradeExecutor;
+CHedgeManager      g_HedgeManager;
 
 // Protection components
 CRiskManager       g_RiskManager;
@@ -233,8 +236,14 @@ void OnDeinit(const int reason)
       Logger.Info(g_PerformanceTracker.GetDetailedReport());
    }
    
+   // Clean up UI objects (Phase 5: DDGuard)
+   ObjectDelete(0, "DDGuardLabel");
+   Comment(""); // Clear comment
+   
    Logger.Info("=== EA Shutdown Complete ===");
 }
+
+
 
 //+------------------------------------------------------------------+
 //| Expert tick function                                             |
@@ -310,6 +319,13 @@ bool InitializeCoreComponents()
    if(!g_TradeExecutor.Init(g_Symbol, InpMagicNumber, 5, 3))  // 5 slippage, 3 retries
    {
       Logger.Error("Failed to initialize TradeExecutor");
+      return false;
+   }
+   
+   // Hedge Manager
+   if(!g_HedgeManager.Init(g_Symbol, InpMagicNumber))
+   {
+      Logger.Error("Failed to initialize HedgeManager");
       return false;
    }
    
@@ -485,7 +501,7 @@ bool CheckProtectionLayers()
    //--- Daily Loss Limit
    if(g_DailyLimit.Check())
    {
-      // Only log if not already paused to avoid spam
+      // ... (existing logic)
       if(g_SystemState.eaState != EA_STATE_PAUSED)
       {
          g_AlertManager.Warning("Daily loss limit reached - Trading paused");
@@ -495,12 +511,19 @@ bool CheckProtectionLayers()
    }
    else if(g_SystemState.eaState == EA_STATE_PAUSED)
    {
-      // If limit is clear (new day reset) but state is still PAUSED, resume trading
+      // ... (existing logic)
       if(!g_HardStop.IsLocked() && !g_EmergencyStop.IsTriggered())
       {
          Logger.Info("Daily loss limit reset - Resuming trading operations");
          g_SystemState.eaState = EA_STATE_IDLE;
       }
+   }
+
+   //--- Layer 1.5: Hedge Soft Lock (Phase 5)
+   // If Hedge is enabled and Triggered, this will Lock the system
+   if(InpUseHedge && g_HedgeManager.CheckAndExecuteLock(currentDD, InpEmergencyStopDD, g_SystemState))
+   {
+       return false; // Stop further processing if Locked
    }
    
    //--- Layer 1: Emergency Stop
@@ -924,6 +947,38 @@ void DisplayStatus()
    status += "═══════════════════════════════════════════════";
    
    Comment(status);
+   
+   //--- Specific UI for DDGuard (Yellow Label as requested)
+   string lblName = "DDGuardLabel";
+   if(ObjectFind(0, lblName) < 0)
+   {
+      ObjectCreate(0, lblName, OBJ_LABEL, 0, 0, 0);
+      ObjectSetInteger(0, lblName, OBJPROP_CORNER, CORNER_LEFT_UPPER);
+      ObjectSetInteger(0, lblName, OBJPROP_XDISTANCE, 15);
+      ObjectSetInteger(0, lblName, OBJPROP_YDISTANCE, 320); // Position below Comment block
+      ObjectSetInteger(0, lblName, OBJPROP_FONTSIZE, 10);
+      ObjectSetString(0, lblName, OBJPROP_FONT, "Arial Bold");
+   }
+   
+   string ddText = "DDGuard: OFF";
+   color ddColor = clrGray;
+   
+   if(InpUseHedge)
+   {
+      if(g_HedgeManager.IsLocked())
+      {
+         ddText = "⚠️ DDGuard: LOCKED (Net Zero) ⚠️";
+         ddColor = clrRed; // Critical state
+      }
+      else
+      {
+         ddText = "🛡️ DDGuard: ARMED (Ready)";
+         ddColor = clrYellow; // Active but waiting
+      }
+   }
+   
+   ObjectSetString(0, lblName, OBJPROP_TEXT, ddText);
+   ObjectSetInteger(0, lblName, OBJPROP_COLOR, ddColor);
 }
 
 //+------------------------------------------------------------------+

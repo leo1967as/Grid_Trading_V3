@@ -22,6 +22,7 @@ enum ENUM_EA_STATE
    EA_STATE_PAUSED,             // Temporarily paused
    EA_STATE_EMERGENCY,          // Emergency mode (Level 1 triggered)
    EA_STATE_RECOVERY,           // Recovery mode (rebuilding equity)
+   EA_STATE_LOCKED,             // Soft Lock mode (Hedge active)
    EA_STATE_STOPPED,            // Stopped by HardStop or DailyLimit
    EA_STATE_ERROR               // Error state
 };
@@ -183,6 +184,7 @@ struct SSystemState
          case EA_STATE_TRADING:      return "Trading";
          case EA_STATE_EMERGENCY:    return "EMERGENCY";
          case EA_STATE_RECOVERY:     return "Recovery";
+         case EA_STATE_LOCKED:       return "LOCKED (Hedged)";
          case EA_STATE_STOPPED:      return "STOPPED";
          case EA_STATE_ERROR:        return "ERROR";
          default:                    return "Unknown";
