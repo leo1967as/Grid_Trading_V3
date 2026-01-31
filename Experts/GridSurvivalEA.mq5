@@ -64,6 +64,7 @@ input group "=== Basic Settings ==="
 input long     InpMagicNumber     = 777777;    // Magic Number
 input double   InpBaseLotSize     = 0.01;      // Base Lot Size
 input int      InpMaxGridLevels   = 10;        // Max Grid Levels
+input ENUM_TRADE_DIRECTION_MODE InpTradeDirection = DIRECTION_LONG_ONLY; // Trade Direction
 
 //--- ATR & Grid Settings
 input group "=== ATR & Grid Settings ==="
@@ -663,32 +664,60 @@ bool OpenFirstGridOrder(double lotSize)
    
    // Set base price at current price
    double currentBid = SymbolInfoDouble(g_Symbol, SYMBOL_BID);
+   double currentAsk = SymbolInfoDouble(g_Symbol, SYMBOL_ASK);
    g_GridEngine.SetBasePrice(currentBid);
    
-   // Generate grid levels
+   // Generate grid levels (Both sides are prepared, usage depends on InpTradeDirection)
    g_GridEngine.GenerateBuyGridLevels(lotSize);
    g_GridEngine.GenerateSellGridLevels(lotSize);
    
-   // Calculate TP/SL prices
    double point = SymbolInfoDouble(g_Symbol, SYMBOL_POINT);
-   double sl = (InpStopLoss > 0) ? currentBid - (InpStopLoss * point) : 0;
-   double tp = (InpTakeProfit > 0) ? currentBid + (InpTakeProfit * point) : 0;
+   bool buyOpened  = false;
+   bool sellOpened = false;
    
-   // Open initial BUY order (Grid Trading typically starts with a market order)
-   if(g_TradeExecutor.OpenBuy(lotSize, sl, tp, "Grid_L0_BUY"))
+   //--- LONG (Buy First Order)
+   if(InpTradeDirection == DIRECTION_LONG_ONLY || InpTradeDirection == DIRECTION_BOTH)
    {
-      g_GridEngine.UpdateBuyLevelStatus(0, GRID_LEVEL_ACTIVE);
-      double gridSpacingPrice = g_GridEngine.GetGridSpacingInPrice();
-      Logger.Info(StringFormat("First BUY order opened: Lot=%.2f | TP/SL=%d/%d | GridSpacing=%.2f", 
-                               lotSize, InpTakeProfit, InpStopLoss, gridSpacingPrice));
+      double sl_buy = (InpStopLoss > 0) ? currentBid - (InpStopLoss * point) : 0;
+      double tp_buy = (InpTakeProfit > 0) ? currentBid + (InpTakeProfit * point) : 0;
+      
+      if(g_TradeExecutor.OpenBuy(lotSize, sl_buy, tp_buy, "Grid_L0_BUY"))
+      {
+         g_GridEngine.UpdateBuyLevelStatus(0, GRID_LEVEL_ACTIVE);
+         Logger.Info(StringFormat("First BUY order opened: Lot=%.2f", lotSize));
+         buyOpened = true;
+      }
+      else
+      {
+         Logger.Error("Failed to open first BUY order");
+      }
+   }
+   
+   //--- SHORT (Sell First Order)
+   if(InpTradeDirection == DIRECTION_SHORT_ONLY || InpTradeDirection == DIRECTION_BOTH)
+   {
+      double sl_sell = (InpStopLoss > 0) ? currentAsk + (InpStopLoss * point) : 0;
+      double tp_sell = (InpTakeProfit > 0) ? currentAsk - (InpTakeProfit * point) : 0;
+      
+      if(g_TradeExecutor.OpenSell(lotSize, sl_sell, tp_sell, "Grid_L0_SELL"))
+      {
+         g_GridEngine.UpdateSellLevelStatus(0, GRID_LEVEL_ACTIVE);
+         Logger.Info(StringFormat("First SELL order opened: Lot=%.2f", lotSize));
+         sellOpened = true;
+      }
+      else
+      {
+         Logger.Error("Failed to open first SELL order");
+      }
+   }
+   
+   if(buyOpened || sellOpened)
+   {
       g_LastGridTradeTime = TimeCurrent();
       return true;
    }
-   else
-   {
-      Logger.Error("Failed to open first BUY order");
-      return false;
-   }
+   
+   return false;
 }
 
 //+------------------------------------------------------------------+
@@ -701,33 +730,53 @@ void PlaceGridPendingOrders(double lotSize)
    // Loop through all levels starting from 1 (Level 0 is market order)
    for(int i = 1; i < InpMaxGridLevels; i++)
    {
-      //--- Check BUY Grid
-      SGridLevel buyLevel = g_GridEngine.GetBuyLevel(i);
-      if(buyLevel.status == GRID_LEVEL_EMPTY)
+      //--- BUY Grid (If Long or Both)
+      if(InpTradeDirection == DIRECTION_LONG_ONLY || InpTradeDirection == DIRECTION_BOTH)
       {
-         double entryPrice = g_GridEngine.CalculateLevelPrice(i, GRID_DIRECTION_BUY);
-         double sl = (InpStopLoss > 0) ? entryPrice - (InpStopLoss * point) : 0;
-         double tp = (InpTakeProfit > 0) ? entryPrice + (InpTakeProfit * point) : 0;
-         
-         // Apply multiplier
-         double adjustedLot = lotSize * MathPow(InpGridMultiplier, i);
-         adjustedLot = NormalizeLot(g_Symbol, adjustedLot);
-         
-         string comment = StringFormat("Grid_L%d_BUY", i);
-         STradeResult result = g_TradeExecutor.BuyLimit(adjustedLot, entryPrice, sl, tp, 0, comment);
-         
-         if(result.success)
+         SGridLevel buyLevel = g_GridEngine.GetBuyLevel(i);
+         if(buyLevel.status == GRID_LEVEL_EMPTY)
          {
-            g_GridEngine.UpdateBuyLevelStatus(i, GRID_LEVEL_PENDING, result.ticket);
-            Logger.Info(StringFormat("Placed Buy Limit L%d at %.5f", i, entryPrice));
+            double entryPrice = g_GridEngine.CalculateLevelPrice(i, GRID_DIRECTION_BUY);
+            double sl = (InpStopLoss > 0) ? entryPrice - (InpStopLoss * point) : 0;
+            double tp = (InpTakeProfit > 0) ? entryPrice + (InpTakeProfit * point) : 0;
+            
+            double adjustedLot = lotSize * MathPow(InpGridMultiplier, i);
+            adjustedLot = NormalizeLot(g_Symbol, adjustedLot);
+            
+            string comment = StringFormat("Grid_L%d_BUY", i);
+            STradeResult result = g_TradeExecutor.BuyLimit(adjustedLot, entryPrice, sl, tp, 0, comment);
+            
+            if(result.success)
+            {
+               g_GridEngine.UpdateBuyLevelStatus(i, GRID_LEVEL_PENDING, result.ticket);
+               Logger.Info(StringFormat("Placed Buy Limit L%d at %.5f", i, entryPrice));
+            }
          }
       }
       
-      //--- Check SELL Grid (for hedging purpose - optional, usually grid is one direction if trend following)
-      // Since this is "Survival Protocol", we assume we might need sell limits if we are hedging.
-      // But for standard grid, we usually just scale in direction.
-      // If user wants bidirectional grid, we can add logic here.
-      // For now, let's stick to Buy Grid as primary (since First Order was Buy)
+      //--- SELL Grid (If Short or Both)
+      if(InpTradeDirection == DIRECTION_SHORT_ONLY || InpTradeDirection == DIRECTION_BOTH)
+      {
+         SGridLevel sellLevel = g_GridEngine.GetSellLevel(i);
+         if(sellLevel.status == GRID_LEVEL_EMPTY)
+         {
+            double entryPrice = g_GridEngine.CalculateLevelPrice(i, GRID_DIRECTION_SELL);
+            double sl = (InpStopLoss > 0) ? entryPrice + (InpStopLoss * point) : 0;
+            double tp = (InpTakeProfit > 0) ? entryPrice - (InpTakeProfit * point) : 0;
+            
+            double adjustedLot = lotSize * MathPow(InpGridMultiplier, i);
+            adjustedLot = NormalizeLot(g_Symbol, adjustedLot);
+            
+            string comment = StringFormat("Grid_L%d_SELL", i);
+            STradeResult result = g_TradeExecutor.SellLimit(adjustedLot, entryPrice, sl, tp, 0, comment);
+            
+            if(result.success)
+            {
+               g_GridEngine.UpdateSellLevelStatus(i, GRID_LEVEL_PENDING, result.ticket);
+               Logger.Info(StringFormat("Placed Sell Limit L%d at %.5f", i, entryPrice));
+            }
+         }
+      }
    }
 }
 

@@ -76,6 +76,16 @@ enum ENUM_TRADE_SIGNAL
 };
 
 //+------------------------------------------------------------------+
+//| Trade Direction Mode (Phase 5.5: Bidirectional)                  |
+//+------------------------------------------------------------------+
+enum ENUM_TRADE_DIRECTION_MODE
+{
+   DIRECTION_LONG_ONLY = 0,       // Long Only (Buy Grid)
+   DIRECTION_SHORT_ONLY,          // Short Only (Sell Grid)
+   DIRECTION_BOTH                 // Both Directions
+};
+
+//+------------------------------------------------------------------+
 //| System State Structure                                           |
 //+------------------------------------------------------------------+
 struct SSystemState
